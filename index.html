@@ -32,6 +32,7 @@
         #status.success { background: #e8f5e9; color: #1b5e20; }
         #status.error { background: #ffebee; color: #b71c1c; }
         #status.info { background: #e3f2fd; color: #0d47a1; }
+        #status.warning { background: #fff3e0; color: #e65100; }
         .btn {
             display: block;
             width: 100%;
@@ -53,6 +54,7 @@
         .stat-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #f5f5f5; }
         .stat-row .count { font-weight: bold; background: #e3f2fd; padding: 0 14px; border-radius: 30px; }
         .total { text-align: center; font-weight: bold; margin-top: 12px; font-size: 18px; }
+        #discountInfo { margin-top: 8px; font-size: 18px; font-weight: bold; color: #2e7d32; display: none; }
     </style>
 </head>
 <body>
@@ -64,6 +66,7 @@
     <div id="scanner-box"></div>
 
     <div id="status">Нажмите «Запустить сканер», чтобы начать</div>
+    <div id="discountInfo"></div>
 
     <button class="btn" id="btnStats">📊 Показать статистику</button>
 
@@ -77,7 +80,7 @@
 
 <script>
     // ------------------------------------------------------------
-    // ВАШИ ДАННЫЕ FIREBASE (уже вставлены)
+    // Firebase Config (ваши данные)
     // ------------------------------------------------------------
     const firebaseConfig = {
         apiKey: "AIzaSyB_NnphXG-1lyGyatz4wTU1rnk9XbnGHEo",
@@ -94,6 +97,7 @@
     // Элементы
     // ------------------------------------------------------------
     const statusDiv = document.getElementById('status');
+    const discountInfo = document.getElementById('discountInfo');
     const scannerBox = document.getElementById('scanner-box');
     const btnStart = document.getElementById('btnStartScanner');
     const btnStats = document.getElementById('btnStats');
@@ -105,7 +109,9 @@
     let html5QrCode = null;
     let isScanning = false;
 
-    // Функция запуска сканера
+    // ------------------------------------------------------------
+    // Сканер
+    // ------------------------------------------------------------
     function startScanner() {
         if (isScanning) return;
         if (!html5QrCode) {
@@ -128,9 +134,7 @@
             { facingMode: "environment" },
             config,
             onScanSuccess,
-            (error) => {
-                // это промежуточные ошибки, игнорируем
-            }
+            (error) => {}
         ).then(() => {
             isScanning = true;
             btnStart.textContent = '🔄 Остановить сканер';
@@ -144,16 +148,14 @@
             isScanning = false;
             statusDiv.className = 'status error';
             if (err === 'Camera access denied.') {
-                statusDiv.textContent = '❌ Доступ к камере запрещён. Разрешите в настройках браузера и нажмите кнопку снова.';
+                statusDiv.textContent = '❌ Доступ к камере запрещён. Разрешите в настройках браузера.';
             } else {
                 statusDiv.textContent = `❌ Ошибка: ${err}`;
             }
-            // Сбрасываем, чтобы можно было повторить
             html5QrCode = null;
         });
     }
 
-    // Функция остановки
     function stopScanner() {
         if (html5QrCode && isScanning) {
             html5QrCode.stop().then(() => {
@@ -163,15 +165,21 @@
                 btnStart.disabled = false;
                 statusDiv.className = 'status';
                 statusDiv.textContent = 'Сканер остановлен.';
-                // Удаляем старый объект, чтобы можно было пересоздать
                 html5QrCode = null;
             }).catch(() => {});
         }
     }
 
-    // Обработка успешного сканирования
+    btnStart.addEventListener('click', function() {
+        if (isScanning) {
+            stopScanner();
+        } else {
+            startScanner();
+        }
+    });
+
+    // Обработка сканирования
     function onScanSuccess(decodedText) {
-        // Останавливаем сканер, чтобы не сканировать повторно
         if (html5QrCode) {
             html5QrCode.stop().then(() => {
                 isScanning = false;
@@ -193,50 +201,69 @@
         try {
             const url = new URL(decodedText);
             const ref = url.searchParams.get('ref');
-            if (ref && ref.trim() !== '') {
-                statusDiv.className = 'status success';
-                statusDiv.textContent = `✅ Распознано: "${ref}". Отправка...`;
-                db.collection("purchases").add({
-                    source: ref,
-                    timestamp: firebase.firestore.FieldValue.serverTimestamp(),
-                    admin: "Касса (сканер)"
-                }).then(() => {
-                    statusDiv.className = 'status success';
-                    statusDiv.textContent = `✅ Продажа записана! Источник: ${ref}`;
-                    loadStats();
-                    // Даем время на показ сообщения
-                    setTimeout(() => {
-                        // Сбрасываем сканер для следующего клиента
-                        if (!isScanning) {
-                            // Но не перезапускаем автоматически, чтобы пользователь нажал кнопку
-                            statusDiv.textContent = 'Готов к следующему сканированию. Нажмите "Запустить сканер".';
-                        }
-                    }, 3000);
-                }).catch((err) => {
-                    statusDiv.className = 'status error';
-                    statusDiv.textContent = `❌ Ошибка записи: ${err.message}`;
-                });
-            } else {
+            if (!ref || ref.trim() === '') {
                 statusDiv.className = 'status error';
-                statusDiv.textContent = '❌ В QR-коде нет параметра "ref" (например, ?ref=bus)';
+                statusDiv.textContent = '❌ Нет параметра "ref" в QR';
+                return;
             }
+            // Проверяем, существует ли такой источник в коллекции sources
+            db.collection('sources').where('ref', '==', ref).get()
+                .then(snapshot => {
+                    let discountText = '';
+                    let sourceExists = false;
+                    let docId = null;
+                    snapshot.forEach(doc => {
+                        sourceExists = true;
+                        const data = doc.data();
+                        if (data.discount) discountText = data.discount;
+                        docId = doc.id;
+                    });
+                    if (!sourceExists) {
+                        statusDiv.className = 'status warning';
+                        statusDiv.textContent = `⚠️ Источник "${ref}" не зарегистрирован в админке. Запись всё равно будет создана.`;
+                        discountInfo.style.display = 'none';
+                    } else {
+                        statusDiv.className = 'status success';
+                        statusDiv.textContent = `✅ Распознано: "${ref}"`;
+                        if (discountText) {
+                            discountInfo.style.display = 'block';
+                            discountInfo.textContent = `🎁 Скидка: ${discountText}`;
+                        } else {
+                            discountInfo.style.display = 'none';
+                        }
+                    }
+                    // Записываем покупку
+                    return db.collection("purchases").add({
+                        source: ref,
+                        timestamp: firebase.firestore.FieldValue.serverTimestamp(),
+                        admin: "Касса (сканер)"
+                    });
+                })
+                .then(() => {
+                    if (statusDiv.className !== 'status warning') {
+                        statusDiv.className = 'status success';
+                        statusDiv.textContent = `✅ Продажа записана! Источник: ${ref}`;
+                    } else {
+                        statusDiv.textContent = `⚠️ Продажа записана для "${ref}" (незарегистрированный источник)`;
+                    }
+                    loadStats();
+                    setTimeout(() => {
+                        // Не перезапускаем автоматически, ждём кнопку
+                    }, 3000);
+                })
+                .catch(err => {
+                    statusDiv.className = 'status error';
+                    statusDiv.textContent = `❌ Ошибка: ${err.message}`;
+                });
         } catch (e) {
             statusDiv.className = 'status error';
-            statusDiv.textContent = '❌ Это не похоже на ссылку с параметрами';
+            statusDiv.textContent = '❌ Ошибка чтения ссылки';
         }
-        // Сканер уже остановлен
     }
 
-    // Обработчик кнопки "Запустить/остановить"
-    btnStart.addEventListener('click', function() {
-        if (isScanning) {
-            stopScanner();
-        } else {
-            startScanner();
-        }
-    });
-
-    // Статистика
+    // ------------------------------------------------------------
+    // Статистика (такая же, как в админке, но проще - за всё время)
+    // ------------------------------------------------------------
     function loadStats() {
         db.collection("purchases").get().then((snapshot) => {
             const map = {};
@@ -270,8 +297,8 @@
         statsBlock.style.display = 'none';
     });
 
-    // При загрузке страницы ничего не запускаем — ждём нажатия кнопки
-    // На всякий случай, если браузер всё же запросит камеру автоматически - не будем.
+    // Загружаем статистику при первом открытии (скрыто)
+    loadStats();
 </script>
 </body>
 </html>
